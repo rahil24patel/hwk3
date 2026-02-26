@@ -1,0 +1,12 @@
+.ipynb_checkpoints/
+
+# big intermediate caches (do not push)
+data/cache/
+data/cache/**
+
+# if you keep any extracted raw data locally
+data/raw/
+data/raw/**
+
+# safe to keep processed outputs, but you can still ignore big ones if needed
+# data/processed/*.csv
