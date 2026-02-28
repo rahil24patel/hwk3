@@ -10,3 +10,11 @@ data/raw/**
 
 # safe to keep processed outputs, but you can still ignore big ones if needed
 # data/processed/*.csv
+
+# HWK3: never push generated data
+data/cache/
+data/output/
+data/processed/
+
+# Jupyter junk
+.ipynb_checkpoints/
