@@ -10,7 +10,7 @@ This is my Homework #3 submission, by Rahil Patel. I have built all necessary da
 - Built a plan-county-year panel by merging monthly enrollment files with service area and penetration data
 
 
-- Extracted star ratings by parsing CMS domain and summary files year by year, using a continuous raw score as a fallback where the official rating was missing
+- Extracted star ratings by analyzing CMS domain and summary files year by year
 
 - Constructed market share, HMO/Part D indicators, and the Star_Rating variable
 
