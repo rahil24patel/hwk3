@@ -1,0 +1,512 @@
+---
+jupyter: econ470-a0kernel
+---
+
+```{python}
+import sys
+!{sys.executable} -m pip install --user -q statsmodels scipy
+
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+from scipy import stats
+from scipy.stats import gaussian_kde
+import statsmodels.api as sm
+
+warnings.filterwarnings('ignore')
+pd.set_option('display.max_columns', 120)
+pd.set_option('display.width', 200)
+
+OUTPUT_DIR = Path('data/output')
+
+df_panel  = pd.read_csv(OUTPUT_DIR / 'ma_data_2010_2015.csv',    dtype=str, low_memory=False)
+df_2010   = pd.read_csv(OUTPUT_DIR / 'ma_data_2010.csv',         dtype=str, low_memory=False)
+plan_year = pd.read_csv(OUTPUT_DIR / 'plan_year_2010_2015.csv',  dtype=str, low_memory=False)
+
+NUMERIC_COLS = ['year', 'Star_Rating', 'raw_score', 'mkt_share',
+                'avg_enrollment', 'last_enrollment', 'avg_enrolled',
+                'avg_eligibles', 'hmo', 'partd_ind', 'new_contract',
+                'total_enrollment']
+
+for df in [df_panel, df_2010, plan_year]:
+    for c in NUMERIC_COLS:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+
+YEARS     = list(range(2010, 2016))
+CUTOFF_3  = 2.75
+CUTOFF_35 = 3.25
+
+print('Data loaded.')
+print(df_panel.groupby('year').size().rename('n'))
+```
+
+```{python}
+# Question 1
+py = plan_year.copy()
+
+q1 = (
+    py
+    .groupby('year', as_index=False)
+    .agg(
+        n_plans        =('planid',         'count'),
+        mean_star      =('Star_Rating',    'mean'),
+        mean_enrollment=('avg_enrollment', 'mean'),
+        mean_mkt_share =('mkt_share',      'mean'),
+    )
+)
+
+print('=== Q1: Summary Statistics by Year ===\n')
+print(
+    q1.round(3)
+      .rename(columns={
+          'year'           : 'Year',
+          'n_plans'        : 'N Plans',
+          'mean_star'      : 'Mean Star Rating',
+          'mean_enrollment': 'Mean Enrollment',
+          'mean_mkt_share' : 'Mean Market Share',
+      })
+      .to_string(index=False)
+)
+```
+
+```{python}
+# Question 2
+py_nostar = py[py['Star_Rating'].isna()].copy()
+
+q2 = (
+    py_nostar
+    .groupby('year', as_index=False)
+    .agg(
+        n_plans        =('planid',         'count'),
+        mean_enrollment=('avg_enrollment', 'mean'),
+        mean_mkt_share =('mkt_share',      'mean'),
+    )
+)
+
+print('=== Q2: Plans Without a Star Rating, by Year ===\n')
+print(
+    q2.round(3)
+      .rename(columns={
+          'year'           : 'Year',
+          'n_plans'        : 'N Plans (No Rating)',
+          'mean_enrollment': 'Mean Enrollment',
+          'mean_mkt_share' : 'Mean Market Share',
+      })
+      .to_string(index=False)
+)
+```
+
+```{python}
+# Question 3
+PLOT_YEARS  = [2010, 2012, 2015]
+STAR_LEVELS = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=False)
+
+for ax, yr in zip(axes, PLOT_YEARS):
+    sub    = py[py['year'] == yr].dropna(subset=['Star_Rating'])
+    counts = sub['Star_Rating'].value_counts().reindex(STAR_LEVELS, fill_value=0)
+    ax.bar([str(s) for s in STAR_LEVELS], counts.values, width=0.6, color='steelblue')
+    ax.set_title(f'{yr}', fontsize=13)
+    ax.set_xlabel('Star Rating')
+    ax.set_ylabel('Number of Plans')
+    ax.tick_params(axis='x', rotation=45)
+
+fig.suptitle('Distribution of MA Star Ratings: 2010, 2012, 2015', fontsize=13)
+plt.tight_layout()
+plt.show()
+
+stats_by_yr = {}
+for yr in PLOT_YEARS:
+    sub       = py[py['year'] == yr].dropna(subset=['Star_Rating'])
+    mode_star = float(sub['Star_Rating'].mode().iloc[0])
+    pct_3plus = float((sub['Star_Rating'] >= 3.0).mean() * 100)
+    stats_by_yr[yr] = {'mode': mode_star, 'pct_3plus': pct_3plus}
+    print(f'  {yr}: modal star = {mode_star},  pct >= 3 stars = {pct_3plus:.1f}%')
+
+print(f"""
+The distribution shifts notably to the right over time. In 2010,
+{stats_by_yr[2010]['pct_3plus']:.1f}% of plans were rated 3 stars or above with a
+modal rating of {stats_by_yr[2010]['mode']}. By 2012 that climbs to
+{stats_by_yr[2012]['pct_3plus']:.1f}%, and by 2015 nearly every plan
+({stats_by_yr[2015]['pct_3plus']:.1f}%) hits 3 stars or higher, with the mode
+now at {stats_by_yr[2015]['mode']} stars. This shows quality
+improvement driven by CMS bonus payments for 4+ star plans introduced in
+2012, and the gradual exit of persistently low-rated plans from the market.
+""")
+```
+
+```{python}
+# Question 4
+def run_ols_year(data, year):
+    sub = data[data['year'] == year].dropna(subset=['mkt_share', 'Star_Rating']).copy()
+    sub['star_3']      = (sub['Star_Rating'] == 3.0).astype(int)
+    sub['star_35']     = (sub['Star_Rating'] == 3.5).astype(int)
+    sub['star_4']      = (sub['Star_Rating'] == 4.0).astype(int)
+    sub['star_45plus'] = (sub['Star_Rating'] >= 4.5).astype(int)
+    X   = sm.add_constant(sub[['star_3', 'star_35', 'star_4', 'star_45plus']], has_constant='add')
+    fit = sm.OLS(sub['mkt_share'], X).fit(cov_type='HC1')
+    return fit
+
+ols_results = {yr: run_ols_year(df_panel, yr) for yr in YEARS}
+
+VAR_ORDER = {
+    'const'      : 'Intercept',
+    'star_3'     : '3 Stars',
+    'star_35'    : '3.5 Stars',
+    'star_4'     : '4 Stars',
+    'star_45plus': '4.5+ Stars',
+}
+
+rows = []
+for var, label in VAR_ORDER.items():
+    coef_row = {'Variable': label}
+    se_row   = {'Variable': ''}
+    for yr in YEARS:
+        fit = ols_results[yr]
+        if var in fit.params:
+            c  = fit.params[var]
+            s  = fit.bse[var]
+            p  = fit.pvalues[var]
+            st = '***' if p < 0.01 else ('**' if p < 0.05 else ('*' if p < 0.10 else ''))
+            coef_row[yr] = f'{c:.4f}{st}'
+            se_row[yr]   = f'({s:.4f})'
+        else:
+            coef_row[yr] = '—'
+            se_row[yr]   = ''
+    rows.append(coef_row)
+    rows.append(se_row)
+
+n_row  = {'Variable': 'N'}
+r2_row = {'Variable': 'R²'}
+for yr in YEARS:
+    fit        = ols_results[yr]
+    n_row[yr]  = f'{int(fit.nobs):,}'
+    r2_row[yr] = f'{fit.rsquared:.4f}'
+rows += [n_row, r2_row]
+
+q4_table = pd.DataFrame(rows).set_index('Variable')
+
+print('=== Q4: OLS of Market Share on Star Rating Dummies, by Year ===')
+print('Baseline = Star Rating <= 2.5  |  * p<0.10  ** p<0.05  *** p<0.01\n')
+print(q4_table.to_string())
+```
+
+```{python}
+rd_df = df_2010.dropna(subset=['raw_score']).copy()
+
+STAR_THRESHOLDS = {
+    3.0: 2.75,
+    3.5: 3.25,
+    4.0: 3.75,
+    4.5: 4.25,
+    5.0: 4.75,
+}
+
+print(f'2010 plan-county obs with raw_score: {rd_df.shape[0]:,}')
+print(f'Unique contracts: {rd_df["contractid"].nunique()}')
+```
+
+```{python}
+# Question 5
+rounded_rows = []
+for star, threshold in STAR_THRESHOLDS.items():
+    mask = (
+        (plan_year['raw_score'] >= threshold) &
+        (plan_year['raw_score'] <  threshold + 0.25)
+    )
+    n = int(mask.sum())
+    rounded_rows.append({'Star Rating': star, 'Rounded': n})
+
+q5_table = pd.DataFrame(rounded_rows)
+
+print('=== Q5: Count of Plans Rounded Up into Each Star Category (2010-2015) ===\n')
+print(q5_table.to_string(index=False))
+```
+
+```{python}
+# Question 6
+def rd_estimate(data, cutoff, bw, outcome='mkt_share'):
+    df_ = data.copy()
+    df_['score_c'] = df_['raw_score'] - cutoff
+    df_['rounded'] = (df_['raw_score'] >= cutoff).astype(int)
+    within = df_[df_['score_c'].abs() <= bw].dropna(subset=[outcome, 'raw_score'])
+    if within.shape[0] < 5:
+        return None, within.shape[0]
+    X   = sm.add_constant(within[['rounded', 'score_c']], has_constant='add')
+    fit = sm.OLS(within[outcome], X).fit(cov_type='HC1')
+    return fit, within.shape[0]
+
+BW = 0.125
+fit_3,  n_3  = rd_estimate(rd_df, CUTOFF_3,  BW)
+fit_35, n_35 = rd_estimate(rd_df, CUTOFF_35, BW)
+
+VAR_LABELS = {
+    'const'   : '(Intercept)',
+    'rounded' : 'Rounded',
+    'score_c' : 'Running Score',
+}
+
+q6_rows = []
+for var, label in VAR_LABELS.items():
+    coef_row = {'': label}
+    se_row   = {'': ''}
+    for col_name, fit in [('3 Stars', fit_3), ('3.5 Stars', fit_35)]:
+        if fit is not None and var in fit.params:
+            coef_row[col_name] = f'{fit.params[var]:.3f}'
+            se_row[col_name]   = f'({fit.bse[var]:.3f})'
+        else:
+            coef_row[col_name] = '—'
+            se_row[col_name]   = ''
+    q6_rows.append(coef_row)
+    q6_rows.append(se_row)
+
+q6_rows.append({
+    ''         : 'Num.Obs.',
+    '3 Stars'  : str(n_3),
+    '3.5 Stars': str(n_35),
+})
+q6_rows.append({
+    ''         : 'R2',
+    '3 Stars'  : f'{fit_3.rsquared:.3f}'  if fit_3  else '—',
+    '3.5 Stars': f'{fit_35.rsquared:.3f}' if fit_35 else '—',
+})
+
+q6_table = pd.DataFrame(q6_rows).set_index('')
+print('=== Q6: RD Estimates by Star Ratings (BW=0.125, 2010) ===\n')
+print(q6_table.to_string())
+```
+
+```{python}
+# Question 7
+BANDWIDTHS = [0.10, 0.11, 0.12, 0.13, 0.14, 0.15]
+
+bw_rows = []
+for bw in BANDWIDTHS:
+    for star_label, cutoff in [('3.0 Stars', CUTOFF_3), ('3.5 Stars', CUTOFF_35)]:
+        fit, n = rd_estimate(rd_df, cutoff, bw)
+        if fit is not None and 'rounded' in fit.params:
+            bw_rows.append({
+                'bandwidth': bw,
+                'star'     : star_label,
+                'estimate' : fit.params['rounded'],
+                'se'       : fit.bse['rounded'],
+                'ci_lo'    : fit.params['rounded'] - 1.96 * fit.bse['rounded'],
+                'ci_hi'    : fit.params['rounded'] + 1.96 * fit.bse['rounded'],
+                'n'        : n,
+            })
+
+bw_df = pd.DataFrame(bw_rows)
+
+fig, ax = plt.subplots(figsize=(8, 5))
+
+style = {
+    '3.0 Stars': ('o', 'navy'),
+    '3.5 Stars': ('^', 'firebrick'),
+}
+
+for label, (marker, color) in style.items():
+    sub = bw_df[bw_df['star'] == label].sort_values('bandwidth')
+    ax.errorbar(
+        sub['bandwidth'], sub['estimate'],
+        yerr=1.96 * sub['se'],
+        fmt=f'{marker}-', color=color, capsize=4,
+        linewidth=1.5, label=label,
+    )
+
+ax.axhline(0, linestyle='--', color='grey', linewidth=0.8)
+ax.set_xlabel('Bandwidth')
+ax.set_ylabel('Estimate and\n95% Confidence Interval')
+ax.set_title('Q7: RD Estimates by Star Ratings and Bandwidth (2010)')
+ax.legend(title='Star Rating')
+ax.set_xticks(BANDWIDTHS)
+plt.tight_layout()
+plt.show()
+
+print('\n=== Q7: Full Sensitivity Table ===\n')
+print(bw_df.round(4).to_string(index=False))
+
+bw_3_range  = (bw_df[bw_df['star']=='3.0 Stars']['estimate'].min(),
+               bw_df[bw_df['star']=='3.0 Stars']['estimate'].max())
+bw_35_range = (bw_df[bw_df['star']=='3.5 Stars']['estimate'].min(),
+               bw_df[bw_df['star']=='3.5 Stars']['estimate'].max())
+
+print(f"""
+The estimates are consistent across all bandwidths tested. At the 3-star
+threshold, the effect ranges from {bw_3_range[0]:.3f} to {bw_3_range[1]:.3f} —
+positive and statistically significant at every bandwidth. At 3.5 stars,
+estimates range from {bw_35_range[0]:.3f} to {bw_35_range[1]:.3f} — negative and
+significant throughout. The confidence intervals are fairly tight and do
+not cross zero at any bandwidth, so the directional findings from Question
+6 hold up regardless of what is chosen.
+""")
+```
+
+```{python}
+# Question 8
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+panels = [
+    (axes[0], CUTOFF_3,  2.60, 2.90, '(a) Around 3.0 cutoff'),
+    (axes[1], CUTOFF_35, 3.10, 3.40, '(b) Around 3.5 cutoff'),
+]
+
+scores_all = rd_df['raw_score'].dropna()
+
+for ax, cutoff, xlo, xhi, title in panels:
+    window = scores_all[(scores_all >= xlo) & (scores_all <= xhi)]
+    if len(window) > 5:
+        kde    = gaussian_kde(window, bw_method=0.05)
+        x_grid = np.linspace(xlo, xhi, 300)
+        ax.plot(x_grid, kde(x_grid) * len(window), color='black', linewidth=1.5)
+    ax.axvline(cutoff, color='black', linestyle='--', linewidth=1.5)
+    ax.set_xlabel('Running Variable')
+    ax.set_ylabel('Number of Plans')
+    ax.set_title(title)
+    ax.set_xlim(xlo, xhi)
+
+fig.suptitle('Q8: Density of Running Variable (2010)', fontsize=12)
+plt.tight_layout()
+plt.show()
+
+print('\n=== Q8: Density Counts Around Each Cutoff ===')
+density_stats = {}
+for cutoff, label in [(CUTOFF_3, '3.0'), (CUTOFF_35, '3.5')]:
+    n_below = int(((scores_all >= cutoff - 0.125) & (scores_all <  cutoff)).sum())
+    n_above = int(((scores_all >= cutoff)          & (scores_all <  cutoff + 0.125)).sum())
+    total   = n_below + n_above
+    chi2_v  = (n_below - total/2)**2/(total/2) + (n_above - total/2)**2/(total/2)
+    p_val   = 1 - stats.chi2.cdf(chi2_v, df=1)
+    density_stats[label] = {'n_below': n_below, 'n_above': n_above, 'p': p_val}
+    print(f'  {label}-star: below={n_below}, above={n_above}, '
+          f'chi2={chi2_v:.3f}, p={p_val:.3f}')
+
+print(f"""
+The density plots show a large imbalance at both cutoffs. Around the 3-star
+threshold, {density_stats['3.0']['n_below']:,} plan-county observations fall just
+below versus only {density_stats['3.0']['n_above']:,} just above (p={density_stats['3.0']['p']:.3f}).
+At 3.5 stars, {density_stats['3.5']['n_below']:,} fall below and {density_stats['3.5']['n_above']:,}
+above (p={density_stats['3.5']['p']:.3f}). Both tests strongly reject a smooth density.
+
+This most likely reflects that in 2010, the underlying distribution of plan quality
+simply scored below 3 stars that year — rather
+than intentional score manipulation. Still, the significant discontinuity
+in the running variable is a limitation of the RD design,
+as it means the density-based validity assumption does not hold cleanly.
+""")
+```
+
+```{python}
+# Question 9
+cov_df = df_2010.dropna(subset=['raw_score']).copy()
+for c in ['hmo', 'partd_ind']:
+    cov_df[c] = pd.to_numeric(cov_df[c], errors='coerce')
+
+BW_COV     = 0.125
+COVARIATES = {'hmo': 'HMO', 'partd_ind': 'Part D'}
+
+bal_rows = []
+for cutoff, star_label in [(CUTOFF_3, '3.0 Stars'), (CUTOFF_35, '3.5 Stars')]:
+    win = cov_df[np.abs(cov_df['raw_score'] - cutoff) <= BW_COV].copy()
+    win['rounded'] = (win['raw_score'] >= cutoff).astype(int)
+    win['score_c'] = win['raw_score'] - cutoff
+    for cov, label in COVARIATES.items():
+        sub = win.dropna(subset=[cov])
+        X   = sm.add_constant(sub[['rounded', 'score_c']], has_constant='add')
+        fit = sm.OLS(sub[cov], X).fit(cov_type='HC1')
+        bal_rows.append({
+            'Threshold'  : star_label,
+            'Covariate'  : label,
+            'Mean Below' : round(sub[sub['rounded'] == 0][cov].mean(), 3),
+            'Mean Above' : round(sub[sub['rounded'] == 1][cov].mean(), 3),
+            'RD Estimate': round(fit.params['rounded'], 4),
+            'SE'         : round(fit.bse['rounded'],    4),
+            'p-value'    : round(fit.pvalues['rounded'], 3),
+        })
+
+balance_table = pd.DataFrame(bal_rows)
+print('=== Q9: Covariate Balance at Star Thresholds (BW=0.125, 2010) ===\n')
+print(balance_table.to_string(index=False))
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+for ax, cov_label in zip(axes, ['HMO', 'Part D']):
+    sub        = balance_table[balance_table['Covariate'] == cov_label]
+    thresholds = sub['Threshold'].tolist()
+    x          = np.arange(len(thresholds))
+    w          = 0.35
+    ax.bar(x - w/2, sub['Mean Below'], width=w, label='Just Below', color='steelblue')
+    ax.bar(x + w/2, sub['Mean Above'], width=w, label='Just Above',  color='firebrick')
+    ax.set_xticks(x)
+    ax.set_xticklabels(thresholds)
+    ax.set_ylabel(f'{cov_label} Rate')
+    ax.set_title(f'Q9: {cov_label} Before and After Threshold')
+    ax.legend()
+
+plt.tight_layout()
+plt.show()
+
+print("""
+The covariate balance results reveal meaningful differences on both sides
+of each threshold. At the 3-star cutoff, HMO rates jump from about 2%
+just below to 45% just above, and Part D rates from 55% to 84% — both
+highly significant. At 3.5 stars, HMO rates actually fall sharply from
+61% to 38%. This suggests that plans just above and below each threshold 
+are systematically different types of plans. This is a meaningful threat to the RD design,
+as it implies the jump in market share at each threshold may partly reflect these
+underlying plan-type differences rather than the rating label itself.
+""")
+```
+
+```{python}
+# Question 10
+est_3  = fit_3.params['rounded']  if fit_3  else float('nan')
+se_3   = fit_3.bse['rounded']     if fit_3  else float('nan')
+est_35 = fit_35.params['rounded'] if fit_35 else float('nan')
+se_35  = fit_35.bse['rounded']    if fit_35 else float('nan')
+
+bw_3_range  = (bw_df[bw_df['star']=='3.0 Stars']['estimate'].min(),
+               bw_df[bw_df['star']=='3.0 Stars']['estimate'].max())
+bw_35_range = (bw_df[bw_df['star']=='3.5 Stars']['estimate'].min(),
+               bw_df[bw_df['star']=='3.5 Stars']['estimate'].max())
+
+pct_3plus_2010 = float((py[py['year']==2010].dropna(subset=['Star_Rating'])['Star_Rating'] >= 3.0).mean()*100)
+pct_3plus_2015 = float((py[py['year']==2015].dropna(subset=['Star_Rating'])['Star_Rating'] >= 3.0).mean()*100)
+
+print('=' * 70)
+print('HOMEWORK 3 SUMMARY')
+print('=' * 70)
+
+print(f"""
+Questions 1-4:
+---------------
+Enrollment grew steadily from 2010 to 2015 and star ratings improved
+significantly — plans rated 3 stars or above went from {pct_3plus_2010:.1f}% to
+{pct_3plus_2015:.1f}% — driven by quality gains and low-rated plan exit. The
+OLS results show 3.0 and 3.5 star plans capture significantly more market
+share than the below-2.5 baseline, though the pattern is inconsistent
+across years and flattens or reverses at the top end.
+
+Questions 5-9: RD Analysis
+----------------------------
+At BW=0.125, crossing the 3-star threshold is associated with a market
+share increase of {est_3:+.3f} (SE={se_3:.3f}), while crossing 3.5 stars
+gives {est_35:+.3f} (SE={se_35:.3f}). Both are statistically significant
+and stable across all bandwidths tested — the 3-star estimate stays
+between {bw_3_range[0]:.3f} and {bw_3_range[1]:.3f}, and the 3.5-star estimate
+between {bw_35_range[0]:.3f} and {bw_35_range[1]:.3f}. The density of the running variable is
+significantly discontinuous at both cutoffs, and HMO and Part D rates
+differ sharply on either side of each threshold.
+
+Conclusion
+-----------
+The RD results show significant jumps in market share at the star rating
+thresholds, but the design assumptions are not cleanly satisfied. The
+large covariate imbalances and density discontinuities suggest the
+estimates likely reflect the errors when I was trying to build the datasets.
+""")
+```
+
